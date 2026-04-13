@@ -421,11 +421,21 @@ def search(session, model, filters=None, sort=None, _initial_query=None):
         for (symbol, field_name) in sort:
             direction_name = 'asc' if symbol == '+' else 'desc'
             related_model = model
-            while '.' in field_name:
-                field_name, _, field_name_in_relation = field_name.partition('.')
-                related_model = aliased(get_related_model(related_model, field_name))
-                field_name = field_name_in_relation
-                query = query.join(related_model)
+            if '[' in field_name:
+                # Rudimentary dict support
+                field_name, field_key = field_name.split('[')
+                field_key, _ = field_key.split(']')
+
+                field = getattr(model, field_name)[field_key]
+
+                direction = getattr(field, direction_name)
+                query = query.order_by(direction())
+            else:
+                while '.' in field_name:
+                    field_name, _, field_name_in_relation = field_name.partition('.')
+                    related_model = aliased(get_related_model(related_model, field_name))
+                    field_name = field_name_in_relation
+                    query = query.join(related_model, getattr(model, field_name))
 
             field = get_field(related_model, field_name)
             direction = getattr(field, direction_name)
