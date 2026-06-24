@@ -435,7 +435,7 @@ def search(session, model, filters=None, sort=None, _initial_query=None):
                     field_name, _, field_name_in_relation = field_name.partition('.')
                     related_model = aliased(get_related_model(related_model, field_name))
                     field_name = field_name_in_relation
-                    query = query.join(related_model, getattr(model, field_name))
+                    query = query.join(related_model)
 
             field = get_field(related_model, field_name)
             direction = getattr(field, direction_name)
