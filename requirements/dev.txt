@@ -1,6 +1,6 @@
 flask>=2.2
 flask-sqlalchemy>=3.0
-sqlalchemy>=1.4,<2.1
+sqlalchemy>=1.4,<3.0
 python-dateutil>2.2
 
 setuptools>=65.5.1
