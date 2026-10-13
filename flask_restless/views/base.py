@@ -17,100 +17,96 @@ The main class in this module, :class:`APIBase`, is a
 for JSON API requests on a SQLAlchemy backend.
 
 """
+
 import math
 import re
 from collections import defaultdict
-from functools import partial
-from functools import wraps
+from functools import partial, wraps
 from http import HTTPStatus
 from itertools import chain
-from typing import Optional
-from typing import Set
-from typing import Tuple
-from urllib.parse import urlparse
-from urllib.parse import urlunparse
+from typing import Optional, Set, Tuple
+from urllib.parse import urlparse, urlunparse
 
-from flask import Response
-from flask import current_app
-from flask import json
-from flask import request
-from flask.views import MethodView
-from flask.views import View
+from flask import Response, current_app, json, request
+from flask.views import MethodView, View
 from sqlalchemy import inspect
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import load_only
-from sqlalchemy.orm import selectinload
-from sqlalchemy.orm.dynamic import DynamicAttributeImpl
+from sqlalchemy.orm import dynamic, load_only, selectinload
 from sqlalchemy.orm.query import Query
 from sqlalchemy.sql import false as FALSE
 from sqlalchemy.sql.elements import BinaryExpression
 from werkzeug.exceptions import HTTPException
 from werkzeug.http import parse_options_header
 
-from ..exceptions import BadRequest
-from ..exceptions import Error
-from ..exceptions import NotFound
-from ..helpers import get_inclusions_for_instances
-from ..helpers import get_model
-from ..helpers import get_related_model
-from ..helpers import is_like_list
-from ..helpers import is_proxy
-from ..helpers import query_by_primary_key
-from ..helpers import session_query
-from ..search import ComparisonToNull
-from ..search import search
-from ..serialization import DefaultSerializer
-from ..serialization import DeserializationException
-from ..serialization import SerializationException
-from ..serialization import Serializer
+from ..exceptions import BadRequest, Error, NotFound
+from ..helpers import (
+    get_inclusions_for_instances,
+    get_model,
+    get_related_model,
+    is_like_list,
+    is_proxy,
+    query_by_primary_key,
+    session_query,
+)
+from ..search import ComparisonToNull, search
+from ..serialization import (
+    DefaultSerializer,
+    DeserializationException,
+    SerializationException,
+    Serializer,
+)
 from ..typehints import ResponseTuple
 from .helpers import count
 from .helpers import upper_keys as upper
 
+DynamicAttributeImpl = (
+    dynamic.DynamicAttributeImpl
+    if hasattr(dynamic, "DynamicAttributeImpl")
+    else dynamic._DynamicAttributeImpl
+)
 #: The Content-Type we expect for most requests to APIs.
 #:
 #: The JSON API specification requires the content type to be
 #: ``application/vnd.api+json``.
-CONTENT_TYPE = 'application/vnd.api+json'
+CONTENT_TYPE = "application/vnd.api+json"
 
 #: The highest version of the JSON API specification supported by
 #: Flask-Restless.
-JSONAPI_VERSION = '1.0'
+JSONAPI_VERSION = "1.0"
 
 #: Strings that indicate a database conflict when appearing in an error
 #: message of an exception raised by SQLAlchemy.
 #:
 #: The particular error message depends on the particular environment
 #: containing the SQLite backend, it seems.
-CONFLICT_INDICATORS = ('conflicts with', 'UNIQUE constraint failed',
-                       'is not unique')
+CONFLICT_INDICATORS = ("conflicts with", "UNIQUE constraint failed", "is not unique")
 
 #: The names of pagination links that appear in both ``Link`` headers
 #: and JSON API links.
-LINK_NAMES = ('first', 'last', 'prev', 'next')
+LINK_NAMES = ("first", "last", "prev", "next")
 
 #: The query parameter key that identifies filter objects in a
 #: :https:method:`get` request.
-FILTER_PARAM = 'filter[objects]'
+FILTER_PARAM = "filter[objects]"
 
 #: The query parameter key that identifies sort fields in a :https:method:`get`
 #: request.
-SORT_PARAM = 'sort'
+SORT_PARAM = "sort"
 
 #: The query parameter key that identifies the page number in a
 #: :https:method:`get` request.
-PAGE_NUMBER_PARAM = 'page[number]'
+PAGE_NUMBER_PARAM = "page[number]"
 
 #: The query parameter key that identifies the page size in a
 #: :https:method:`get` request.
-PAGE_SIZE_PARAM = 'page[size]'
+PAGE_SIZE_PARAM = "page[size]"
 
 #: A regular expression for Accept headers.
 #:
 #: For an explanation of "media-range", etc., see Sections 5.3.{1,2} of
 #: RFC 7231.
 ACCEPT_RE = re.compile(
-    r'''(                       # media-range capturing-parenthesis
+    r"""(                       # media-range capturing-parenthesis
           [^\s;,]+              # type/subtype
           (?:[ \t]*;[ \t]*      # ";"
             (?:                 # parameter non-capturing-parenthesis
@@ -124,11 +120,12 @@ ACCEPT_RE = re.compile(
           (\d*(?:\.\d+)?)       # qvalue capturing-parentheses
           [^,]*                 # "extension" accept params: who cares?
         )?                      # accept params are optional
-    ''', re.VERBOSE)
+    """,
+    re.VERBOSE,
+)
 
 #: Keys in a JSON API error object.
-ERROR_FIELDS = ('id_', 'links', 'status', 'code_', 'title', 'detail', 'source',
-                'meta')
+ERROR_FIELDS = ("id_", "links", "status", "code_", "title", "detail", "source", "meta")
 
 
 def collection_parameters():
@@ -143,21 +140,25 @@ def collection_parameters():
     """
     try:
         # Determine filtering options.
-        filters = json.loads(request.args.get(FILTER_PARAM, '[]'))
+        filters = json.loads(request.args.get(FILTER_PARAM, "[]"))
 
         # Determine sorting options.
         sort = request.args.get(SORT_PARAM)
         if sort:
-            if sort == '0':
+            if sort == "0":
                 # '0' disables default sorting
                 sort = None
             else:
-                sort = [('-', value[1:]) if value.startswith('-') else ('+', value)
-                        for value in sort.split(',')]
+                sort = [
+                    ("-", value[1:]) if value.startswith("-") else ("+", value)
+                    for value in sort.split(",")
+                ]
         else:
             sort = []
     except (TypeError, KeyError, ValueError) as e:
-        raise BadRequest(cause=e, details='Unable to decode filter objects as JSON list') from e
+        raise BadRequest(
+            cause=e, details="Unable to decode filter objects as JSON list"
+        ) from e
 
     return filters, sort
 
@@ -167,6 +168,7 @@ class PaginationError(Exception):
     pagination parameter supplied by the client.
 
     """
+
     pass
 
 
@@ -189,8 +191,19 @@ class ProcessingException(HTTPException):
 
     """
 
-    def __init__(self, id_=None, links=None, status=400, code=None, title=None,
-                 detail=None, source=None, meta=None, *args, **kw):
+    def __init__(
+        self,
+        id_=None,
+        links=None,
+        status=400,
+        code=None,
+        title=None,
+        detail=None,
+        source=None,
+        meta=None,
+        *args,
+        **kw,
+    ):
         super(ProcessingException, self).__init__(*args, **kw)
         self.id_ = id_
         self.links = links
@@ -221,14 +234,12 @@ class MultipleExceptions(Exception):
 
 
 def un_camel_case(s):
-    """Inserts spaces before the capital letters in a camel case string.
-
-    """
+    """Inserts spaces before the capital letters in a camel case string."""
     # This regular expression appears on StackOverflow
     # <https://stackoverflow.com/a/199120/108197>, and is distributed
     # under the Creative Commons Attribution-ShareAlike 3.0 Unported
     # license.
-    return re.sub(r'(?<=\w)([A-Z])', r' \1', s)
+    return re.sub(r"(?<=\w)([A-Z])", r" \1", s)
 
 
 def catch_processing_exceptions(func):
@@ -236,6 +247,7 @@ def catch_processing_exceptions(func):
     returns a JSON-ified error response.
 
     """
+
     @wraps(func)
     def new_func(*args, **kw):
         """Executes ``func(*args, **kw)`` but catches
@@ -248,8 +260,9 @@ def catch_processing_exceptions(func):
             kw = {key: getattr(exception, key) for key in ERROR_FIELDS}
             # Need to change the name of the `code` key as a workaround
             # for name collisions with Werkzeug exception classes.
-            kw['code'] = kw.pop('code_')
+            kw["code"] = kw.pop("code_")
             return error_response(cause=exception, **kw)
+
     return new_func
 
 
@@ -269,6 +282,7 @@ def parse_accept_header(value):
     media type parameters, then ``extra`` is simply ``None``.
 
     """
+
     def match_to_pair(match):
         """Returns the pair ``(name, quality)`` from the given match
         object for the Accept header regular expression.
@@ -286,6 +300,7 @@ def parse_accept_header(value):
         # quality is ``None`` instead of ``1`` here.
         quality = max(min(float(extra), 1), 0) if extra else None
         return name, quality
+
     return map(match_to_pair, ACCEPT_RE.finditer(value))
 
 
@@ -319,13 +334,14 @@ def requires_json_api_accept(func):
     .. _Server Responsibilities: https://jsonapi.org/format/#content-negotiation-servers
 
     """
+
     @wraps(func)
     def new_func(*args, **kw):
         """Executes ``func(*args, **kw)`` only after checking for the
         correct JSON API :https:header:`Accept` header.
 
         """
-        header = request.headers.get('Accept')
+        header = request.headers.get("Accept")
         # If there is no Accept header, we don't need to do anything.
         if header is None:
             return func(*args, **kw)
@@ -340,24 +356,32 @@ def requires_json_api_accept(func):
         # proceed as normal with the request.
         if len(header_pairs) == 0:
             return func(*args, **kw)
-        jsonapi_pairs = [(name, extra) for name, extra in header_pairs
-                         if name.startswith(CONTENT_TYPE)]
+        jsonapi_pairs = [
+            (name, extra)
+            for name, extra in header_pairs
+            if name.startswith(CONTENT_TYPE)
+        ]
         # If there are Accept headers but none of them specifies the
         # JSON API media type, respond with `406 Not Acceptable`.
         if len(jsonapi_pairs) == 0:
-            detail = ('Accept header, if specified, must be the JSON API media'
-                      ' type: application/vnd.api+json')
+            detail = (
+                "Accept header, if specified, must be the JSON API media"
+                " type: application/vnd.api+json"
+            )
             return error_response(406, detail=detail)
         # If there are JSON API Accept headers, but they all have media
         # type parameters, respond with `406 Not Acceptable`.
         if all(extra is not None for name, extra in jsonapi_pairs):
-            detail = ('Accept header contained JSON API content type, but each'
-                      ' instance occurred with media type parameters; at least'
-                      ' one instance must appear without parameters (the part'
-                      ' after the semicolon)')
+            detail = (
+                "Accept header contained JSON API content type, but each"
+                " instance occurred with media type parameters; at least"
+                " one instance must appear without parameters (the part"
+                " after the semicolon)"
+            )
             return error_response(406, detail=detail)
         # At this point, everything is fine, so just execute the method as-is.
         return func(*args, **kw)
+
     return new_func
 
 
@@ -376,6 +400,7 @@ def requires_json_api_mimetype(func):
             return '...'
 
     """
+
     @wraps(func)
     def new_func(*args, **kw):
         """Executes ``func(*args, **kw)`` only after checking for the
@@ -389,9 +414,9 @@ def requires_json_api_mimetype(func):
         # Ideally we would be able to decorate each individual request
         # methods directly, but it is not possible with the current
         # design of Flask's method-based views.
-        if request.method not in ('PATCH', 'POST'):
+        if request.method not in ("PATCH", "POST"):
             return func(*args, **kw)
-        header = request.headers.get('Content-Type')
+        header = request.headers.get("Content-Type")
         content_type, extra = parse_options_header(header)
         content_is_json = content_type.startswith(CONTENT_TYPE)
         # Request must have the Content-Type: application/vnd.api+json header,
@@ -401,9 +426,10 @@ def requires_json_api_mimetype(func):
         # JSON API requires that the content type header does not have
         # any media type parameters.
         if extra:
-            detail = f'Content-Type header must not have any media type parameters but found {extra}'
+            detail = f"Content-Type header must not have any media type parameters but found {extra}"
             return error_response(415, detail=detail)
         return func(*args, **kw)
+
     return new_func
 
 
@@ -412,7 +438,13 @@ def mime_renderer(func):
     @wraps(func)
     def new_func(*args, **kw):
         data, status_code, headers = func(*args, **kw)
-        return Response(response=json.dumps(data), status=status_code, mimetype=CONTENT_TYPE, headers=headers)
+        return Response(
+            response=json.dumps(data),
+            status=status_code,
+            mimetype=CONTENT_TYPE,
+            headers=headers,
+        )
+
     return new_func
 
 
@@ -434,11 +466,13 @@ def catch_integrity_errors(session):
     Flask application, and an error response is returned to the client.
 
     """
+
     def decorated(func):
         """Returns a decorated version of ``func``, as described in the
         wrapper defined within.
 
         """
+
         @wraps(func)
         def wrapped(*args, **kw):
             """Executes ``func(*args, **kw)`` but catches any exception
@@ -458,7 +492,9 @@ def catch_integrity_errors(session):
                 detail = str(exception)
                 title = un_camel_case(exception.__class__.__name__)
                 return error_response(status, detail=detail, title=title)
+
         return wrapped
+
     return decorated
 
 
@@ -495,9 +531,11 @@ def parse_sparse_fields(type_=None):
     """
     # TODO use a regular expression to ensure field parameters are of the
     # correct format? (maybe ``fields\[[^\[\]\.]*\]``)
-    fields = {key[7:-1]: set(value.split(','))
-              for key, value in request.args.items()
-              if key.startswith('fields[') and key.endswith(']')}
+    fields = {
+        key[7:-1]: set(value.split(","))
+        for key, value in request.args.items()
+        if key.startswith("fields[") and key.endswith("]")
+    }
     return fields.get(type_) if type_ is not None else fields
 
 
@@ -530,8 +568,8 @@ def resources_from_path(instance, path):
     """
     # First, split the path to determine the sequence of relationships
     # to follow.
-    if '.' in path:
-        path = path.split('.')
+    if "." in path:
+        path = path.split(".")
     else:
         path = [path]
     # Next, do a breadth-first traversal of the resources related to
@@ -592,12 +630,20 @@ def extract_error_messages(exception):
     if isinstance(exception, DeserializationException):
         return exception.args[0]
     # 'errors' comes from sqlalchemy_elixir_validations
-    if hasattr(exception, 'errors'):
+    if hasattr(exception, "errors"):
         return exception.errors
 
 
-def error(id_=None, links=None, status=None, code=None, title=None,
-          detail=None, source=None, meta=None):
+def error(
+    id_=None,
+    links=None,
+    status=None,
+    code=None,
+    title=None,
+    detail=None,
+    source=None,
+    meta=None,
+):
     """Returns a dictionary representation of an error as described in the
     JSON API specification.
 
@@ -612,7 +658,7 @@ def error(id_=None, links=None, status=None, code=None, title=None,
     """
     # HACK We use locals() so we don't have to list every keyword argument.
     if all(kwvalue is None for kwvalue in locals().values()):
-        raise ValueError('At least one of the arguments must not be None.')
+        raise ValueError("At least one of the arguments must not be None.")
 
     # JSON API requires 'status' field to be a string
     if isinstance(status, HTTPStatus):
@@ -620,8 +666,16 @@ def error(id_=None, links=None, status=None, code=None, title=None,
     elif isinstance(status, int):
         status = str(status)
 
-    return {'id': id_, 'links': links, 'status': status, 'code': code,
-            'title': title, 'detail': detail, 'source': source, 'meta': meta}
+    return {
+        "id": id_,
+        "links": links,
+        "status": status,
+        "code": code,
+        "title": title,
+        "detail": detail,
+        "source": source,
+        "meta": meta,
+    }
 
 
 def error_response(status=400, cause=None, **kw):
@@ -666,7 +720,7 @@ def errors_response(status, errors) -> Tuple[dict, int, dict]:
     .. _Errors: https://jsonapi.org/format/#errors
 
     """
-    document = {'errors': errors, 'jsonapi': {'version': JSONAPI_VERSION}}
+    document = {"errors": errors, "jsonapi": {"version": JSONAPI_VERSION}}
     return document, status, {}
 
 
@@ -686,8 +740,8 @@ def error_from_serialization_exception(exception, included=False):
     if exception.message is not None:
         detail = exception.message
     else:
-        resource = 'included resource' if included else 'resource'
-        detail = 'Failed to serialize {0} of type {1} and ID {2}'
+        resource = "included resource" if included else "resource"
+        detail = "Failed to serialize {0} of type {1} and ID {2}"
         detail = detail.format(resource, exception.resource_type, exception.resource_id)
     return error(status=500, detail=detail)
 
@@ -787,7 +841,7 @@ class Paginated:
         the request string in a :https:method:`get` request.
 
         """
-        return ','.join(''.join((dir_, field)) for dir_, field in sort)
+        return ",".join("".join((dir_, field)) for dir_, field in sort)
 
     @staticmethod
     def _url_without_pagination_params():
@@ -802,15 +856,19 @@ class Paginated:
         headers = request.headers
         # If X-Forwarded- headers are present use their values to build the URL
         # because request could be proxied by a load balancer
-        host = headers.get('X-Forwarded-Host', request.host)
-        proto = headers.get('X-Forwarded-Proto', request.scheme)
+        host = headers.get("X-Forwarded-Host", request.host)
+        proto = headers.get("X-Forwarded-Proto", request.scheme)
         query_params = request.args
         # Set the new query_parameters to be everything except the
         # pagination query parameters.
-        new_query = {k: v for k, v in query_params.items() if k not in (PAGE_NUMBER_PARAM, PAGE_SIZE_PARAM)}
-        new_query_string = '&'.join(map('='.join, new_query.items()))
+        new_query = {
+            k: v
+            for k, v in query_params.items()
+            if k not in (PAGE_NUMBER_PARAM, PAGE_SIZE_PARAM)
+        }
+        new_query_string = "&".join(map("=".join, new_query.items()))
         # Join the base URL with the query parameter string.
-        return f'{proto}://{host}{path}?{new_query_string}'
+        return f"{proto}://{host}{path}?{new_query_string}"
 
     @staticmethod
     def _to_url(base_url, query_params):
@@ -826,16 +884,26 @@ class Paginated:
         `query_params` are appended.
 
         """
-        query_string = '&'.join(map('='.join, query_params.items()))
+        query_string = "&".join(map("=".join, query_params.items()))
         scheme, netloc, path, params, query, fragment = urlparse(base_url)
         if query:
-            query_string = '&'.join((query, query_string))
+            query_string = "&".join((query, query_string))
         parsed = (scheme, netloc, path, params, query_string, fragment)
         return urlunparse(parsed)
 
-    def __init__(self, items, first=None, last=None, prev=None, next_=None,
-                 page_size=None, num_results=None, filters=None, sort=None,
-                 raw_items=None):
+    def __init__(
+        self,
+        items,
+        first=None,
+        last=None,
+        prev=None,
+        next_=None,
+        page_size=None,
+        num_results=None,
+        filters=None,
+        sort=None,
+        raw_items=None,
+    ):
         self._items = items
         self._raw_items = raw_items
         self._num_results = num_results
@@ -975,9 +1043,24 @@ class ModelView(MethodView):
 
 
 class FetchView(View):
-    decorators = [catch_processing_exceptions, requires_json_api_accept, requires_json_api_mimetype, mime_renderer]
+    decorators = [
+        catch_processing_exceptions,
+        requires_json_api_accept,
+        requires_json_api_mimetype,
+        mime_renderer,
+    ]
 
-    def __init__(self, session, model, api_manager, page_size=10, max_page_size=100, preprocessors=None, postprocessors=None, includes=None):
+    def __init__(
+        self,
+        session,
+        model,
+        api_manager,
+        page_size=10,
+        max_page_size=100,
+        preprocessors=None,
+        postprocessors=None,
+        includes=None,
+    ):
         self.session = session
         self.model = model
         self.api_manager = api_manager
@@ -993,11 +1076,11 @@ class FetchView(View):
             self.default_includes = {}
 
     def dispatch_request(self, *args, **kwargs):
-        include = request.args.get('include')
+        include = request.args.get("include")
         if include is None:
             include = self.default_includes
         else:
-            include = set(include.split(','))
+            include = set(include.split(","))
 
         try:
             return self.get_data(*args, include=include, **kwargs)
@@ -1008,7 +1091,9 @@ class FetchView(View):
         except MultipleExceptions as e:
             return errors_from_serialization_exceptions(e.exceptions)
 
-    def get_data(self, *args, include: Optional[Set[str]] = None, **kwargs) -> ResponseTuple:
+    def get_data(
+        self, *args, include: Optional[Set[str]] = None, **kwargs
+    ) -> ResponseTuple:
         raise NotImplementedError
 
     def _serialize_instances(self, instances):
@@ -1036,11 +1121,7 @@ class FetchView(View):
         return serialized_instances
 
     def _selectinload_included_relationships(
-            self,
-            query: Query,
-            include: Set[str],
-            serializer: Serializer,
-            filters=None
+        self, query: Query, include: Set[str], serializer: Serializer, filters=None
     ) -> Query:
 
         def is_safe_to_selectload(attribute):
@@ -1049,7 +1130,9 @@ class FetchView(View):
                 inspected_relationship = inspect(attribute)
                 if inspected_relationship.property.secondary:
                     return False
-                if not isinstance(inspected_relationship.property.primaryjoin, BinaryExpression):
+                if not isinstance(
+                    inspected_relationship.property.primaryjoin, BinaryExpression
+                ):
                     return False
             except Exception:
                 # we do not have enough information, assume it's not safe
@@ -1057,13 +1140,15 @@ class FetchView(View):
 
             return True
 
-        join_paths = {path.split('.')[0] for path in include}
+        join_paths = {path.split(".")[0] for path in include}
 
         for path in join_paths:
             attribute = getattr(self.model, path)
             if not is_safe_to_selectload(attribute):
                 continue
-            if not is_proxy(attribute) and not isinstance(attribute.impl, DynamicAttributeImpl):
+            if not is_proxy(attribute) and not isinstance(
+                attribute.impl, DynamicAttributeImpl
+            ):
                 query = query.options(selectinload(attribute))
 
         relationship_columns = serializer.relationship_columns
@@ -1077,7 +1162,11 @@ class FetchView(View):
             attribute = getattr(self.model, path)
             if not is_safe_to_selectload(attribute):
                 continue
-            if path not in join_paths and not is_proxy(attribute) and not isinstance(attribute.impl, DynamicAttributeImpl):
+            if (
+                path not in join_paths
+                and not is_proxy(attribute)
+                and not isinstance(attribute.impl, DynamicAttributeImpl)
+            ):
                 options = selectinload(attribute)
 
                 # if request contains filters we need to load all columns
@@ -1104,18 +1193,24 @@ class FetchCollection(FetchView):
             preprocessor(filters=filters, sort=sort)
         page_size = int(request.args.get(PAGE_SIZE_PARAM, self.page_size))
         if page_size > self.max_page_size:
-            raise BadRequest(details=f"Page size must not exceed the server's maximum: {self.max_page_size}")
+            raise BadRequest(
+                details=f"Page size must not exceed the server's maximum: {self.max_page_size}"
+            )
         if page_size < 0:
-            raise BadRequest(details='Page size can not be negative')
+            raise BadRequest(details="Page size can not be negative")
         page_number = int(request.args.get(PAGE_NUMBER_PARAM, 1))
         if page_number < 0:
-            raise BadRequest(details='Page number can not be negative')
+            raise BadRequest(details="Page number can not be negative")
         if page_size == 0 and page_number > 1:
-            raise BadRequest(details='Page number can not be used with with page size 0')
+            raise BadRequest(
+                details="Page number can not be used with with page size 0"
+            )
 
         serializer = self.api_manager.serializer_for(self.model)
         query = search(self.session, self.model, filters=filters, sort=sort)
-        query = self._selectinload_included_relationships(query, include, serializer, filters=filters)
+        query = self._selectinload_included_relationships(
+            query, include, serializer, filters=filters
+        )
 
         if page_size == 0:
             instances = query.all()
@@ -1137,22 +1232,30 @@ class FetchCollection(FetchView):
             # TODO Use Query.slice() instead, since it's easier to use.
             instances = query.limit(page_size).offset(offset).all()
         data = self._serialize_instances(instances)
-        paginated_data = Paginated(data, page_size=page_size, num_results=num_results, next_=next_, prev=prev, first=first, last=last)
-        links = {'self': self.api_manager.url_for(self.model)}
+        paginated_data = Paginated(
+            data,
+            page_size=page_size,
+            num_results=num_results,
+            next_=next_,
+            prev=prev,
+            first=first,
+            last=last,
+        )
+        links = {"self": self.api_manager.url_for(self.model)}
         links.update(paginated_data.pagination_links)
-        link_header = ','.join(paginated_data.header_links)
+        link_header = ",".join(paginated_data.header_links)
         headers = dict(Link=link_header)
         result = {
-            'jsonapi': {'version': JSONAPI_VERSION},
-            'data': paginated_data.items,
-            'links': links,
-            'meta': {'total': paginated_data.num_results}
+            "jsonapi": {"version": JSONAPI_VERSION},
+            "data": paginated_data.items,
+            "links": links,
+            "meta": {"total": paginated_data.num_results},
         }
 
         if include:
             include_set = get_inclusions_for_instances(include, instances)
             include_list = self._serialize_instances(include_set)
-            result['included'] = include_list
+            result["included"] = include_list
 
         for postprocessor in self.postprocessors:
             postprocessor(result=result, filters=filters, sort=sort)
@@ -1161,7 +1264,9 @@ class FetchCollection(FetchView):
 
 class FetchResource(FetchView):
 
-    def get_data(self, *args, include=None, resource_id=None, **kwargs) -> ResponseTuple:
+    def get_data(
+        self, *args, include=None, resource_id=None, **kwargs
+    ) -> ResponseTuple:
         for preprocessor in self.preprocessors:
             temp_result = preprocessor(resource_id=resource_id)
             # Let the return value of the preprocessor be the new value of
@@ -1180,19 +1285,18 @@ class FetchResource(FetchView):
         query = self._selectinload_included_relationships(query, include, serializer)
         instance = query.first()
         if not instance:
-            raise NotFound(details=f'No resource with ID {resource_id}')
+            raise NotFound(details=f"No resource with ID {resource_id}")
 
         data = self._serialize_instances([instance])
-        result = {
-            'jsonapi': {'version': JSONAPI_VERSION},
-            'data': data[0]
-        }
+        result = {"jsonapi": {"version": JSONAPI_VERSION}, "data": data[0]}
 
         if include:
             include_set = get_inclusions_for_instances(include, [instance])
-            include_set.discard(instance)  # do not duplicate resource itself inside include
+            include_set.discard(
+                instance
+            )  # do not duplicate resource itself inside include
             include_list = self._serialize_instances(include_set)
-            result['included'] = include_list
+            result["included"] = include_list
 
         for postprocessor in self.postprocessors:
             postprocessor(result=result)
@@ -1220,11 +1324,24 @@ class APIBase(ModelView):
     #: List of decorators applied to every method of this class.
     decorators = [catch_processing_exceptions] + ModelView.decorators
 
-    def __init__(self, session, model, api_manager, preprocessors=None, postprocessors=None,
-                 primary_key=None, serializer=None, deserializer=None,
-                 validation_exceptions=None, includes=None, page_size=10,
-                 max_page_size=100, allow_to_many_replacement=False, *args,
-                 **kw):
+    def __init__(
+        self,
+        session,
+        model,
+        api_manager,
+        preprocessors=None,
+        postprocessors=None,
+        primary_key=None,
+        serializer=None,
+        deserializer=None,
+        validation_exceptions=None,
+        includes=None,
+        page_size=10,
+        max_page_size=100,
+        allow_to_many_replacement=False,
+        *args,
+        **kw,
+    ):
         super(APIBase, self).__init__(session, model, *args, **kw)
 
         #: The name of the collection specified by the given model class
@@ -1298,7 +1415,7 @@ class APIBase(ModelView):
         def decorate(name, func):
             return setattr(self, name, func(getattr(self, name)))
 
-        for method in ['get', 'post', 'patch', 'delete']:
+        for method in ["get", "post", "patch", "delete"]:
             # Check if the subclass has the method before trying to decorate it.
             if hasattr(self, method):
                 decorate(method, catch_integrity_errors(self.session))
@@ -1351,11 +1468,16 @@ class APIBase(ModelView):
         self.session.rollback()
         errors = extract_error_messages(exception)
         if not errors:
-            return error_response(400, cause=exception, title='Validation error')
+            return error_response(400, cause=exception, title="Validation error")
         if isinstance(errors, dict):
-            errors = [error(title='Validation error', status=400,
-                            detail='{0}: {1}'.format(field, detail))
-                      for field, detail in errors.items()]
+            errors = [
+                error(
+                    title="Validation error",
+                    status=400,
+                    detail="{0}: {1}".format(field, detail),
+                )
+                for field, detail in errors.items()
+            ]
         current_app.logger.exception(str(exception))
         return errors_response(400, errors)
 
@@ -1429,7 +1551,12 @@ class APIBase(ModelView):
         # one instance. Otherwise, collect the resources to include for
         # each instance in `instances`.
         if isinstance(instance_or_instances, (Query, list)):
-            to_include = set(chain.from_iterable(self.resources_to_include(resource) for resource in instance_or_instances))
+            to_include = set(
+                chain.from_iterable(
+                    self.resources_to_include(resource)
+                    for resource in instance_or_instances
+                )
+            )
         else:
             to_include = self.resources_to_include(instance_or_instances)
         # This may raise MultipleExceptions if there are problems
@@ -1463,7 +1590,7 @@ class APIBase(ModelView):
         # large.
         page_size = int(request.args.get(PAGE_SIZE_PARAM, self.page_size))
         if page_size < 0:
-            raise PaginationError('Page size must be a positive integer')
+            raise PaginationError("Page size must be a positive integer")
         if page_size > self.max_page_size:
             msg = "Page size must not exceed the server's maximum: {0}"
             msg = msg.format(self.max_page_size)
@@ -1476,20 +1603,27 @@ class APIBase(ModelView):
             # Use `len()` here instead of doing `count(self.session,
             # items)` because the former should be faster.
             num_results = len(result)
-            return Paginated(result, page_size=page_size, num_results=num_results, raw_items=raw_items)
+            return Paginated(
+                result,
+                page_size=page_size,
+                num_results=num_results,
+                raw_items=raw_items,
+            )
         # Determine the client's page number request. Raise an exception
         # if the page number is out of bounds.
         page_number = int(request.args.get(PAGE_NUMBER_PARAM, 1))
         if page_number < 0:
-            raise PaginationError('Page number must be a positive integer')
+            raise PaginationError("Page number must be a positive integer")
         # At this point, we know the page size is positive, so we
         # paginate the response.
         #
         # If the query is really a Flask-SQLAlchemy query, we can use
         # its built-in pagination. Otherwise, we need to manually
         # compute the page numbers, the number of results, etc.
-        if hasattr(items, 'paginate'):
-            pagination = items.paginate(page=page_number, per_page=page_size, error_out=False)
+        if hasattr(items, "paginate"):
+            pagination = items.paginate(
+                page=page_number, per_page=page_size, error_out=False
+            )
             num_results = pagination.total
             first = 1
             last = pagination.pages
@@ -1520,13 +1654,26 @@ class APIBase(ModelView):
         # Wrap the list of results in a Paginated object, which
         # represents the result set and stores some extra information
         # about how it was determined.
-        return Paginated(result, num_results=num_results, first=first,
-                         last=last, next_=next_, prev=prev,
-                         page_size=page_size, filters=filters, sort=sort,
-                         raw_items=raw_items)
+        return Paginated(
+            result,
+            num_results=num_results,
+            first=first,
+            last=last,
+            next_=next_,
+            prev=prev,
+            page_size=page_size,
+            filters=filters,
+            sort=sort,
+            raw_items=raw_items,
+        )
 
-    def _get_resource_helper(self, resource, primary_resource=None,
-                             relation_name=None, related_resource=False):
+    def _get_resource_helper(
+        self,
+        resource,
+        primary_resource=None,
+        relation_name=None,
+        related_resource=False,
+    ):
         is_relationship = self.use_resource_identifiers()
         # The resource to serialize may be `None`, if we are fetching a
         # to-one relation that has no value. In this case, the "data"
@@ -1539,14 +1686,17 @@ class APIBase(ModelView):
             # single resource here. Thus we provide a list of length one
             # as input and assume a list of length one as output.
             try:
-                data = self._serialize_many([resource],
-                                            relationship=is_relationship)
+                data = self._serialize_many([resource], relationship=is_relationship)
             except MultipleExceptions as e:
                 return errors_from_serialization_exceptions(e.exceptions)
             data = data[0]
         # Prepare the dictionary that will contain the JSON API response.
-        result = {'jsonapi': {'version': JSONAPI_VERSION}, 'meta': {},
-                  'links': {}, 'data': data}
+        result = {
+            "jsonapi": {"version": JSONAPI_VERSION},
+            "meta": {},
+            "links": {},
+            "data": data,
+        }
         # Determine the top-level links.
         is_relation = primary_resource is not None
         is_related_resource = is_relation and related_resource
@@ -1554,19 +1704,33 @@ class APIBase(ModelView):
             resource_id = self.api_manager.primary_key_value(primary_resource)
             related_resource_id = self.api_manager.primary_key_value(resource)
             # `self.model` should match `get_model(primary_resource)`
-            self_link = self.api_manager.url_for(self.model, resource_id=resource_id, relation_name=relation_name, related_resource_id=related_resource_id)
-            result['links']['self'] = self_link
+            self_link = self.api_manager.url_for(
+                self.model,
+                resource_id=resource_id,
+                relation_name=relation_name,
+                related_resource_id=related_resource_id,
+            )
+            result["links"]["self"] = self_link
         else:
             resource_id = self.api_manager.primary_key_value(primary_resource)
             # `self.model` should match `get_model(primary_resource)`
             if is_relationship:
-                self_link = self.api_manager.url_for(self.model, resource_id=resource_id, relation_name=relation_name, relationship=True)
-                related_link = self.api_manager.url_for(self.model, resource_id=resource_id, relation_name=relation_name)
-                result['links']['self'] = self_link
-                result['links']['related'] = related_link
+                self_link = self.api_manager.url_for(
+                    self.model,
+                    resource_id=resource_id,
+                    relation_name=relation_name,
+                    relationship=True,
+                )
+                related_link = self.api_manager.url_for(
+                    self.model, resource_id=resource_id, relation_name=relation_name
+                )
+                result["links"]["self"] = self_link
+                result["links"]["related"] = related_link
             else:
-                self_link = self.api_manager.url_for(self.model, resource_id=resource_id, relation_name=relation_name)
-                result['links']['self'] = self_link
+                self_link = self.api_manager.url_for(
+                    self.model, resource_id=resource_id, relation_name=relation_name
+                )
+                result["links"]["self"] = self_link
 
         # Include any requested resources in a compound document.
         try:
@@ -1578,19 +1742,20 @@ class APIBase(ModelView):
             # `errors_from_serialization_exception()`.
             return errors_from_serialization_exceptions(e.exceptions, included=True)
         if included:
-            result['included'] = included
+            result["included"] = included
         # HACK Need to do this here to avoid a too-long line.
-        kw = {'is_relation': is_relation,
-              'is_related_resource': is_related_resource}
+        kw = {"is_relation": is_relation, "is_related_resource": is_related_resource}
         # This method could have been called on a request to fetch a
         # single resource, a to-one relation, or a member of a to-many
         # relation.
-        processor_type = 'GET_{0}'.format(self.resource_processor_type(**kw))
+        processor_type = "GET_{0}".format(self.resource_processor_type(**kw))
         for postprocessor in self.postprocessors[processor_type]:
             postprocessor(result=result)
         return result, 200, {}
 
-    def _get_collection_helper(self, resource, relation_name, filters=None, sort=None) -> Tuple[dict, int, dict]:
+    def _get_collection_helper(
+        self, resource, relation_name, filters=None, sort=None
+    ) -> Tuple[dict, int, dict]:
         # Compute the result of the search on the model.
         is_relation = resource is not None
         model = get_model(resource)
@@ -1599,14 +1764,18 @@ class APIBase(ModelView):
 
         # Filter by only those related values that are related to `instance`.
         relationship = getattr(resource, relation_name)
-        primary_keys = {self.api_manager.primary_key_value(inst) for inst in relationship}
+        primary_keys = {
+            self.api_manager.primary_key_value(inst) for inst in relationship
+        }
         # If the relationship is empty, we can avoid a potentially expensive
         # filtering operation by simply returning an intentionally empty
         # query.
         if not primary_keys:
             query = query.filter(FALSE())
         else:
-            query = query.filter(self.api_manager.primary_key_value(related_model).in_(primary_keys))
+            query = query.filter(
+                self.api_manager.primary_key_value(related_model).in_(primary_keys)
+            )
 
         search_ = partial(search, self.session, related_model, _initial_query=query)
         try:
@@ -1617,10 +1786,10 @@ class APIBase(ModelView):
 
         # Prepare the dictionary that will contain the JSON API response.
         result = {
-            'jsonapi': {'version': JSONAPI_VERSION},
+            "jsonapi": {"version": JSONAPI_VERSION},
         }
         meta = {}
-        links = {'self': self.api_manager.url_for(self.model)}
+        links = {"self": self.api_manager.url_for(self.model)}
 
         # Add the primary data (and any necessary links) to the JSON API
         # response object.
@@ -1635,15 +1804,15 @@ class APIBase(ModelView):
             detail = exception.args[0]
             return error_response(400, cause=exception, detail=detail)
         # Wrap the resulting object or list of objects under a `data` key.
-        result['data'] = paginated.items
+        result["data"] = paginated.items
         # Provide top-level links.
         links.update(paginated.pagination_links)
-        result['links'] = links
-        link_header = ','.join(paginated.header_links)
+        result["links"] = links
+        link_header = ",".join(paginated.header_links)
         headers = dict(Link=link_header)
         # Add the metadata to the JSON API response object.
-        meta['total'] = paginated.num_results
-        result['meta'] = meta
+        meta["total"] = paginated.num_results
+        result["meta"] = meta
 
         # Determine the resources to include (in a compound document).
         if self.use_resource_identifiers():
@@ -1658,15 +1827,14 @@ class APIBase(ModelView):
             # guaranteed that each of the underlying exceptions is a
             # `SerializationException`. Thus we can use
             # `errors_from_serialization_exception()`.
-            return errors_from_serialization_exceptions(e.exceptions,
-                                                        included=True)
+            return errors_from_serialization_exceptions(e.exceptions, included=True)
         if included:
-            result['included'] = included
+            result["included"] = included
 
         # This method could have been called on either a request to
         # fetch a collection of resources or a to-many relation.
         processor_type = self.collection_processor_type(is_relation=is_relation)
-        for postprocessor in self.postprocessors[f'GET_{processor_type}']:
+        for postprocessor in self.postprocessors[f"GET_{processor_type}"]:
             postprocessor(result=result, filters=filters, sort=sort)
         return result, 200, headers
 
@@ -1687,11 +1855,15 @@ class APIBase(ModelView):
         #
         # We expect `toinclude` to be a comma-separated list of relationship
         # paths.
-        toinclude = request.args.get('include')
+        toinclude = request.args.get("include")
         if toinclude is None and self.default_includes is None:
             return {}
         elif toinclude is None and self.default_includes is not None:
             toinclude = self.default_includes
         else:
-            toinclude = set(toinclude.split(','))
-        return set(chain.from_iterable(resources_from_path(instance, path) for path in toinclude))
+            toinclude = set(toinclude.split(","))
+        return set(
+            chain.from_iterable(
+                resources_from_path(instance, path) for path in toinclude
+            )
+        )
